@@ -1,0 +1,250 @@
+
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; }
+.grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+.card { background: var(--color-background-primary); border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-lg); padding: 1rem 1.25rem; }
+.metric { background: var(--color-background-secondary); border-radius: var(--border-radius-md); padding: 0.85rem 1rem; }
+.metric-label { font-size: 12px; color: var(--color-text-secondary); margin: 0 0 4px; }
+.metric-value { font-size: 22px; font-weight: 500; color: var(--color-text-primary); margin: 0; }
+.metric-unit { font-size: 13px; color: var(--color-text-secondary); }
+.obs { padding: 10px 14px; border-radius: var(--border-radius-md); font-size: 13px; font-weight: 500; margin-bottom: 8px; }
+.obs.high { background: var(--color-background-info); color: var(--color-text-info); }
+.obs.low { background: var(--color-background-success); color: var(--color-text-success); }
+.obs.mid { background: var(--color-background-warning); color: var(--color-text-warning); }
+.obs.seed { background: var(--color-background-warning); color: var(--color-text-warning); border-left: 3px solid; border-color: var(--color-border-warning); margin-top: 4px; font-size: 12px; font-weight: 400; }
+.section-title { font-size: 13px; font-weight: 500; color: var(--color-text-secondary); margin: 0 0 10px; letter-spacing: 0.03em; text-transform: uppercase; }
+.loc-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+.loc-row input { flex: 1; min-width: 80px; font-size: 13px; height: 32px; padding: 0 8px; }
+.loc-row button { font-size: 13px; padding: 0 12px; height: 32px; cursor: pointer; white-space: nowrap; }
+.loc-row label { font-size: 12px; color: var(--color-text-secondary); }
+.status { font-size: 12px; color: var(--color-text-secondary); margin-bottom: 12px; display: flex; gap: 6px; align-items: center; }
+.dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.dot.ok { background: #4caf50; }
+.dot.loading { background: #ff9800; }
+.dot.err { background: #f44336; }
+.chart-wrap { position: relative; width: 100%; height: 260px; }
+.legend-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; font-size: 12px; color: var(--color-text-secondary); }
+.legend-dot { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 4px; }
+.refresh-note { font-size: 11px; color: var(--color-text-secondary); margin-top: 6px; }
+</style>
+
+<div style="padding: 0.5rem 0 1.5rem;">
+
+<p class="section-title" style="margin-bottom:4px;">Location</p>
+<div class="loc-row">
+  <label>Lat</label><input id="lat" value="27.7172" type="number" step="0.0001">
+  <label>Lon</label><input id="lon" value="85.3240" type="number" step="0.0001">
+  <button onclick="fetchData()">Update ↗</button>
+</div>
+
+<div id="status" class="status"><span class="dot loading"></span> Fetching data...</div>
+
+<div class="grid4" id="metrics">
+  <div class="metric"><p class="metric-label">Cloud Cover</p><p class="metric-value" id="m-cloud">—<span class="metric-unit">%</span></p></div>
+  <div class="metric"><p class="metric-label">Temperature</p><p class="metric-value" id="m-temp">—<span class="metric-unit">°C</span></p></div>
+  <div class="metric"><p class="metric-label">Humidity</p><p class="metric-value" id="m-hum">—<span class="metric-unit">%</span></p></div>
+  <div class="metric"><p class="metric-label">Pressure</p><p class="metric-value" id="m-pres">—<span class="metric-unit"> hPa</span></p></div>
+</div>
+
+<div id="obs-box" style="margin-bottom:16px;"></div>
+
+<p class="section-title">48-hour time series</p>
+<div class="legend-row">
+  <span><span class="legend-dot" style="background:#378add"></span>Cloud cover (%)</span>
+  <span><span class="legend-dot" style="background:#e85d24"></span>Temperature (°C)</span>
+  <span><span class="legend-dot" style="background:#1d9e75"></span>Humidity (%)</span>
+</div>
+<div class="chart-wrap"><canvas id="tsChart"></canvas></div>
+<p class="refresh-note" id="last-updated">Auto-refreshes every 60s &bull; Data: Open-Meteo (free, no API key)</p>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+let chart = null;
+
+function setStatus(state, msg) {
+  const el = document.getElementById('status');
+  el.innerHTML = `<span class="dot ${state}"></span> ${msg}`;
+}
+
+function getObservation(cloud, hum) {
+  let html = '';
+  if (cloud > 70 && hum > 60) {
+    html += `<div class="obs high">High cloud density (${cloud}%) with elevated humidity (${hum}%). Conditions may be suitable for precipitation.</div>`;
+    html += `<div class="obs seed">Cloud seeding observation: moisture and density thresholds met — potential candidate conditions.</div>`;
+  } else if (cloud < 20) {
+    html += `<div class="obs low">Clear skies (${cloud}% cover). Low probability of significant cloud formation.</div>`;
+  } else {
+    html += `<div class="obs mid">Moderate cloud cover (${cloud}%). Monitor for developing conditions.</div>`;
+  }
+  return html;
+}
+
+async function fetchData() {
+  const lat = parseFloat(document.getElementById('lat').value) || 27.7172;
+  const lon = parseFloat(document.getElementById('lon').value) || 85.3240;
+
+  setStatus('loading', 'Fetching from Open-Meteo...');
+
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,cloud_cover,surface_pressure,weather_code,wind_speed_10m&hourly=temperature_2m,relative_humidity_2m,cloud_cover,surface_pressure&timezone=auto&forecast_days=2`;
+
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const d = await res.json();
+
+    const cur = d.current;
+    const cloud = Math.round(cur.cloud_cover);
+    const temp  = Math.round(cur.temperature_2m * 10) / 10;
+    const hum   = Math.round(cur.relative_humidity_2m);
+    const pres  = Math.round(cur.surface_pressure);
+
+    document.getElementById('m-cloud').innerHTML = `${cloud}<span class="metric-unit">%</span>`;
+    document.getElementById('m-temp').innerHTML  = `${temp}<span class="metric-unit">°C</span>`;
+    document.getElementById('m-hum').innerHTML   = `${hum}<span class="metric-unit">%</span>`;
+    document.getElementById('m-pres').innerHTML  = `${pres}<span class="metric-unit"> hPa</span>`;
+    document.getElementById('obs-box').innerHTML = getObservation(cloud, hum);
+
+    const now = new Date();
+    const nowH = now.getFullYear()+'-'+(String(now.getMonth()+1).padStart(2,'0'))+'-'+(String(now.getDate()).padStart(2,'0'))+'T'+(String(now.getHours()).padStart(2,'0'));
+
+    const allTimes = d.hourly.time;
+    const startIdx = allTimes.findIndex(t => t >= nowH.slice(0,13));
+    const range = 48;
+    const start = Math.max(0, startIdx - 12);
+    const end   = Math.min(allTimes.length, start + range);
+
+    const labels = allTimes.slice(start, end).map(t => {
+      const dt = new Date(t);
+      return dt.getHours().toString().padStart(2,'0') + ':00\n' +
+             (dt.getMonth()+1)+'/'+dt.getDate();
+    });
+
+    const clouds = d.hourly.cloud_cover.slice(start, end);
+    const temps  = d.hourly.temperature_2m.slice(start, end);
+    const hums   = d.hourly.relative_humidity_2m.slice(start, end);
+    const nowIdx = startIdx - start;
+
+    const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+    const gridColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
+    const tickColor = isDark ? '#888' : '#aaa';
+
+    const vlinePlugin = {
+      id: 'nowLine',
+      afterDraw(chart) {
+        if (nowIdx < 0 || nowIdx >= labels.length) return;
+        const ctx = chart.ctx;
+        const x = chart.scales.x.getPixelForValue(nowIdx);
+        const {top, bottom} = chart.chartArea;
+        ctx.save();
+        ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.2)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4,3]);
+        ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = tickColor;
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('now', x, top - 4);
+        ctx.restore();
+      }
+    };
+
+    if (chart) { chart.destroy(); chart = null; }
+    chart = new Chart(document.getElementById('tsChart'), {
+      type: 'line',
+      plugins: [vlinePlugin],
+      data: {
+        labels,
+        datasets: [
+          {
+            label: 'Cloud cover (%)',
+            data: clouds,
+            borderColor: '#378add',
+            backgroundColor: 'rgba(55,138,221,0.12)',
+            fill: true,
+            tension: 0.35,
+            borderWidth: 1.5,
+            pointRadius: 0,
+            yAxisID: 'y'
+          },
+          {
+            label: 'Temperature (°C)',
+            data: temps,
+            borderColor: '#e85d24',
+            backgroundColor: 'rgba(232,93,36,0.06)',
+            fill: false,
+            tension: 0.4,
+            borderWidth: 1.5,
+            pointRadius: 0,
+            yAxisID: 'y1'
+          },
+          {
+            label: 'Humidity (%)',
+            data: hums,
+            borderColor: '#1d9e75',
+            backgroundColor: 'rgba(29,158,117,0.07)',
+            fill: false,
+            tension: 0.35,
+            borderWidth: 1.5,
+            pointRadius: 0,
+            borderDash: [4,3],
+            yAxisID: 'y'
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              title: (items) => items[0].label.replace('\n', ' ')
+            }
+          }
+        },
+        scales: {
+          x: {
+            ticks: {
+              maxRotation: 0,
+              autoSkip: true,
+              maxTicksLimit: 12,
+              color: tickColor,
+              font: { size: 10 }
+            },
+            grid: { color: gridColor }
+          },
+          y: {
+            min: 0, max: 100,
+            title: { display: true, text: '% (Cloud / Humidity)', color: tickColor, font: { size: 10 } },
+            ticks: { color: tickColor, font: { size: 10 }, stepSize: 25 },
+            grid: { color: gridColor }
+          },
+          y1: {
+            position: 'right',
+            title: { display: true, text: '°C', color: tickColor, font: { size: 10 } },
+            ticks: { color: tickColor, font: { size: 10 } },
+            grid: { drawOnChartArea: false }
+          }
+        }
+      }
+    });
+
+    const now2 = new Date();
+    setStatus('ok', `Last updated: ${now2.toLocaleTimeString()} — ${d.timezone || 'local timezone'}`);
+    document.getElementById('last-updated').textContent =
+      `Auto-refreshes every 60s  •  Data: Open-Meteo (free, no API key)  •  Lat ${lat.toFixed(4)}, Lon ${lon.toFixed(4)}`;
+
+  } catch (e) {
+    setStatus('err', 'Error: ' + e.message);
+  }
+}
+
+fetchData();
+setInterval(fetchData, 60000);
+</script>
